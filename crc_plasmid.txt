@@ -55,24 +55,134 @@ run_dbcan.py protein_seqSRRnum.fasta  protein --db_dir CAZyDB/ --out_dir cazyout
 
 
 ####MMUPHin####
-fit_adjust_batch <- adjust_batch(feature_abd = crc_ddcount,
+library(MMUPHin)
+fit_adjust_batch <- adjust_batch(feature_abd = crc_count_all8,
                                  batch = "batch",
                                  covariates = "group",
-                                 data = csif)
+                                 data = metadata)
 CRC_abd_adj <- fit_adjust_batch$feature_abd_adj
 
-fit_lm_meta <- lm_meta(feature_abd = CRC_abd_adj,
+CRC_ddcount_adj<-CRC_abd_adj[which(CRC_abd_adj$batch %in% c("CHN1", "CHN2", "JPN", "AUS", "FRA", "USA")),]
+fit_lm_meta <- lm_meta(feature_abd = CRC_ddcount_adj,
                        batch = "batch",
                        exposure = "group",
-                       data = csif,
+                       data = metadata,
                        control = list(verbose = FALSE))
+meta_fits <- fit_lm_meta$meta_fits
+meta_fits %>%
+  filter(pval< 0.05) %>%
+  arrange(coef) %>%
+  mutate(feature = factor(feature, levels = feature)) %>%
+  ggplot(aes(y = coef, x = feature)) +
+  geom_bar(stat = "identity") +
+  coord_flip()
+meta_feature<-na.omit(meta_fits[meta_fits$pval< 0.05,]$feature)
 
 ####Boruta####
-seed(2022)
-boruta.train <- Boruta(as.factor(group) ~ .,data = CRC_ddcount_adj, doTrace = 2)
+library(Boruta)
+seed(666)
+CRC_ddcount_adj<-CRC_abd_adj[which(CRC_abd_adj$batch %in% c("CHN1", "CHN2", "JPN", "AUS", "FRA", "USA")),]
+CRC_ddcount_boruta<-CRC_ddcount_adj[,c("group",meta_feature)]
+boruta.train <- Boruta(as.factor(group) ~ .,data = CRC_ddcount_boruta, doTrace = 2)
+decision<-as.data.frame(boruta.train$finalDecision)
+microbiome_markers<- rownames(decision)[decision$`boruta.train$finalDecision` !="Rejected"]
 
-####randomForest####
-prei <- randomForest(group~.,data= fold_train,ntree=500,proximity=TRUE,importance=TRUE)
 
+
+####cross-validation within each cohort####
+library(randomForest)
+rf_selfcv_count<-CRC_abd_adj[which(CRC_abd_adj$batch %in% c("CHN1", "CHN2", "JPN", "AUS", "FRA", "USA")),]
+
+for (g in c("CHN1","CHN2","JPN","AUS","FRA","USA")) {
+  train_6_data<-rf_selfcv_count[which(rf_selfcv_count$batch == g),]
+  train_6_data<-train_6_data[,c("group",microbiome_markers)]
+  for (j in 1:20) {  set.seed(9*j)
+    folds <- createFolds(y=train_6_data$group,k=10)
+    for(i in 1:10){    
+      fold_test <- train_6_data[folds[[i]],]   
+      fold_train <- train_6_data[-folds[[i]],]     
+      predict_model <- randomForest(group~.,data= fold_train,ntree=500,proximity=TRUE,importance=TRUE)
+      predict_selfcv <- predict (predict_model,type="prob",newdata=fold_test )
+      predict_result<-roc(response = fold_test$group,
+                        predictor = predict_selfcv[,2])
+      print(predict_result$auc[1])
+    }
+  }
+}
+
+####cohort-cohort validation####
+
+rf_c2c_count<-CRC_abd_adj[which(CRC_abd_adj$batch %in% c("CHN1", "CHN2", "JPN", "AUS", "FRA", "USA")),]
+
+for (g in c("CHN1","CHN2","JPN","AUS","FRA","USA")) {
+  train_6_data<-rf_c2c_count[which(rf_c2c_count$batch == g),]
+  train_6_data<-train_6_data[,c("group",microbiome_markers)]
+  for (j in 1:20) {  set.seed(9*j)
+    folds <- createFolds(y=train_6_data$group,k=10)
+    for(i in 1:10){    
+      fold_test <- train_6_data[folds[[i]],]   
+      fold_train <- train_6_data[-folds[[i]],]     
+      predict_model <- randomForest(group~.,data= fold_train,ntree=500,proximity=TRUE,importance=TRUE)
+  
+      for (s in c("CHN1","CHN2","JPN","AUS","FRA","USA")) {
+        train_6_data_c2c<-rf_c2c_count[which(rf_c2c_count$batch == s),]
+        train_6_data_c2c<-train_6_data_c2c[,c("group",microbiome_markers)]
+        predict_c2c <- predict (predict_model,type="prob",newdata=train_6_data_c2c)
+        predict_result<-roc(response = train_6_data_c2c$group,
+                        predictor = predict_c2c[,2])
+        print(predict_result$auc[1])
+      }
+    }
+  }
+}
+
+
+
+####loco validation####
+
+rf_loco_count<-CRC_abd_adj[which(CRC_abd_adj$batch %in% c("CHN1", "CHN2", "JPN", "AUS", "FRA", "USA")),]
+
+for (g in c("CHN1","CHN2","JPN","AUS","FRA","USA")) {
+  train_6_data<-rf_loco_count[which(rf_loco_count$batch == g),]
+  train_6_data<-train_6_data[,c("group",microbiome_markers)]
+  train_5_data<-train_6_data[which(train_6_data$batch != g),]
+  train_loco_data<-train_6_data[which(train_6_data$batch == g),]
+  for (j in 1:20) {  set.seed(9*j)
+    folds <- createFolds(y=train_5_data$group,k=10)
+    for(i in 1:10){    
+      fold_test <- train_5_data[folds[[i]],]   
+      fold_train <- train_5_data[-folds[[i]],]     
+      predict_model <- randomForest(group~.,data= fold_train,ntree=500,proximity=TRUE,importance=TRUE)
+      predict_loco <- predict (predict_model,type="prob",newdata=train_loco_data )
+      predict_result<-roc(response = train_loco_data$group,
+                        predictor = predict_loco[,2])
+      print(predict_result$auc[1])
+    }
+  }
+}
+
+####independent validation####
+
+rf_indepedent_count_CHN3<-CRC_abd_adj[which(CRC_abd_adj$batch %in% "CHN3"),]
+rf_indepedent_count_GER<-CRC_abd_adj[which(CRC_abd_adj$batch %in% "GER"),]
+rf_train_count<-CRC_abd_adj[which(CRC_abd_adj$batch %in% c("CHN1", "CHN2", "JPN", "AUS", "FRA", "USA")),]
+
+  for (j in 1:20) {  set.seed(9*j)
+    folds <- createFolds(y=rf_train_count$group,k=10)
+    for(i in 1:10){    
+      fold_test <- rf_train_count[folds[[i]],]   
+      fold_train <- rf_train_count[-folds[[i]],]     
+      predict_model <- randomForest(group~.,data= fold_train,ntree=500,proximity=TRUE,importance=TRUE)
+      predict_indepent_CHN3 <- predict (predict_model,type="prob",newdata=rf_indepedent_count_CHN3 )
+      predict_result_CHN3<-roc(response = rf_indepedent_count_CHN3$group,
+                        predictor = predict_indepent_CHN3[,2])
+      print(predict_result_CHN3$auc[1])
+      predict_indepent_GER<- predict (predict_model,type="prob",newdata=rf_indepedent_count_GER )
+      predict_result_GER<-roc(response = rf_indepedent_count_GER$group,
+                        predictor = predict_indepent_CHN3[,2])
+      print(predict_result_GER$auc[1])
+    }
+  }
+}
 
 
